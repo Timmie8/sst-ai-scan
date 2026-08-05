@@ -1,32 +1,116 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 
-app = Flask(__name__)
-CORS(app)
+
+# ==========================
+# SST AI SCANNER
+# ==========================
+
+st.set_page_config(
+    page_title="SST AI Scanner",
+    page_icon="🚀",
+    layout="wide"
+)
 
 
-def calculate_rsi(series, period=14):
+st.title("🚀 SST AI Trading Scanner")
+st.caption("Yahoo Finance • Intraday • AI Score")
+
+
+# ==========================
+# WATCHLIST
+# ==========================
+
+if "tickers" not in st.session_state:
+    st.session_state.tickers = [
+        "NVDA",
+        "TSLA",
+        "AAPL"
+    ]
+
+
+with st.sidebar:
+
+    st.header("Watchlist")
+
+    new_ticker = st.text_input(
+        "Add ticker"
+    )
+
+
+    if st.button("Add"):
+
+        if new_ticker:
+            t = new_ticker.upper()
+
+            if t not in st.session_state.tickers:
+                st.session_state.tickers.append(t)
+
+
+    remove = st.selectbox(
+        "Remove ticker",
+        [""] + st.session_state.tickers
+    )
+
+
+    if st.button("Delete"):
+
+        if remove:
+            st.session_state.tickers.remove(remove)
+
+
+
+# ==========================
+# INDICATORS
+# ==========================
+
+
+def ema(series, length=20):
+
+    return (
+        series
+        .ewm(span=length)
+        .mean()
+        .iloc[-1]
+    )
+
+
+
+def rsi(series, period=14):
 
     delta = series.diff()
 
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    gain = delta.clip(lower=0)
+
+    loss = -delta.clip(upper=0)
+
 
     avg_gain = gain.rolling(period).mean()
+
     avg_loss = loss.rolling(period).mean()
+
 
     rs = avg_gain / avg_loss
 
-    rsi = 100 - (100/(1+rs))
 
-    return rsi.iloc[-1]
+    value = 100 - (100/(1+rs))
 
 
-def calculate_vwap(df):
+    return value.iloc[-1]
 
-    price = (df.High + df.Low + df.Close)/3
+
+
+def vwap(df):
+
+    price = (
+        df.High +
+        df.Low +
+        df.Close
+    ) / 3
+
 
     return (
         price * df.Volume
@@ -34,152 +118,248 @@ def calculate_vwap(df):
 
 
 
-@app.route("/scan")
-def scan():
+def volume_spike(df):
 
-    ticker = request.args.get("ticker")
+    avg = (
+        df.Volume
+        .tail(20)
+        .mean()
+    )
 
-    if not ticker:
-        return jsonify({"error":"No ticker"})
+
+    current = (
+        df.Volume
+        .iloc[-1]
+    )
+
+
+    return current > avg * 2
+
+
+
+# ==========================
+# SCORING
+# ==========================
+
+
+def ai_score(df):
+
+    price = df.Close.iloc[-1]
+
+    score = 0
+
+
+    e = ema(df.Close)
+
+    r = rsi(df.Close)
+
+    v = vwap(df)
+
+
+
+    if price > e:
+        score += 25
+
+
+    if price > v:
+        score += 25
+
+
+    if r > 55:
+        score += 25
+
+
+    if volume_spike(df):
+        score += 25
+
+
+    return score
+
+
+
+# ==========================
+# SCANNER
+# ==========================
+
+
+results=[]
+
+
+for ticker in st.session_state.tickers:
 
 
     try:
 
-        stock = yf.Ticker(ticker)
-
-
-        # 5 minute
-        df5 = stock.history(
+        data = yf.download(
+            ticker,
+            period="5d",
             interval="5m",
-            period="1d"
+            progress=False
         )
 
 
-        # 1 hour
-        df1h = stock.history(
-            interval="60m",
-            period="5d"
+        if data.empty:
+
+            continue
+
+
+
+        # Multi timeframe
+        score = ai_score(data)
+
+
+        price = float(
+            data.Close.iloc[-1]
         )
 
 
-        if df5.empty:
-            return jsonify({
-                "error":"No data"
-            })
-
-
-        close=df5.Close
-
-
-        price=float(close.iloc[-1])
-
-
-        ema=float(
-            close.ewm(span=20).mean().iloc[-1]
+        r = float(
+            rsi(data.Close)
         )
 
 
-        rsi=float(
-            calculate_rsi(close)
+        e = float(
+            ema(data.Close)
         )
 
 
-        vwap=float(
-            calculate_vwap(df5)
+        v = float(
+            vwap(data)
         )
 
 
-        volume=df5.Volume.iloc[-1]
+        spike = volume_spike(data)
 
 
-        avg_volume=df5.Volume.tail(20).mean()
-
-
-        volume_spike = volume > avg_volume*2
-
-
-        high=float(
-            df5.High.tail(20).max()
+        high = float(
+            data.High.max()
         )
 
 
-        low=float(
-            df5.Low.tail(20).min()
+        low = float(
+            data.Low.min()
         )
 
 
-        breakout = price >= high*0.99
+        if score >=75:
+            signal="🔥 STRONG BUY"
+
+        elif score >=50:
+            signal="👀 WATCH"
+
+        else:
+            signal="⚠️ WEAK"
 
 
 
-        score=0
+        results.append({
 
-
-        if price>ema:
-            score+=20
-
-        if price>vwap:
-            score+=20
-
-        if rsi>55:
-            score+=20
-
-        if volume_spike:
-            score+=20
-
-        if breakout:
-            score+=20
-
-
-
-        return jsonify({
-
-            "ticker":ticker,
-
-            "price":round(price,2),
-
-            "rsi":round(rsi,1),
-
-            "ema":round(ema,2),
-
-            "vwap":round(vwap,2),
-
-            "volume_spike":volume_spike,
-
-            "breakout":breakout,
-
-            "score":score,
-
-            "probability":score,
-
-            "premarket_high":
-                round(float(df5.High.max()),2),
-
-            "premarket_low":
-                round(float(df5.Low.min()),2)
+            "Ticker":ticker,
+            "Price":round(price,2),
+            "RSI":round(r,1),
+            "EMA20":round(e,2),
+            "VWAP":round(v,2),
+            "Volume Spike":spike,
+            "High":round(high,2),
+            "Low":round(low,2),
+            "AI Score":score,
+            "Signal":signal
 
         })
 
 
-    except Exception as e:
+    except Exception as ex:
 
-        return jsonify({
-            "error":str(e)
-        })
-
-
-
-@app.route("/")
-
-def home():
-
-    return "SST AI Scanner Backend Running"
+        st.warning(
+            f"{ticker}: {ex}"
+        )
 
 
 
-if __name__=="__main__":
+# ==========================
+# DISPLAY
+# ==========================
 
-    app.run(
-        host="0.0.0.0",
-        port=8501
+
+if results:
+
+
+    df=pd.DataFrame(results)
+
+
+    df=df.sort_values(
+        "AI Score",
+        ascending=False
+    )
+
+
+    st.subheader("🔥 Top SST Setups")
+
+
+    st.dataframe(
+        df,
+        use_container_width=True
+    )
+
+
+    st.subheader("🏆 Top 3")
+
+
+    for _,row in df.head(3).iterrows():
+
+        st.success(
+            f"{row.Ticker} → {row['AI Score']}%  {row.Signal}"
+        )
+
+
+
+    # Chart
+
+    selected = st.selectbox(
+        "Chart",
+        st.session_state.tickers
+    )
+
+
+    chart = yf.download(
+        selected,
+        period="5d",
+        interval="5m",
+        progress=False
+    )
+
+
+    if not chart.empty:
+
+
+        fig=go.Figure()
+
+
+        fig.add_trace(
+            go.Candlestick(
+                x=chart.index,
+                open=chart.Open,
+                high=chart.High,
+                low=chart.Low,
+                close=chart.Close
+            )
+        )
+
+
+        fig.update_layout(
+            height=500,
+            template="plotly_dark"
+        )
+
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+
+else:
+
+    st.info(
+        "No data available"
     )
