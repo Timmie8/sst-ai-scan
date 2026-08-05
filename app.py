@@ -1,301 +1,323 @@
 import streamlit as st
-import yfinance as yf
+import requests
 import pandas as pd
+import numpy as np
+import time
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
-
-# ==========================
-# SST AI SCANNER
-# ==========================
 
 st.set_page_config(
-    page_title="SST AI Scanner",
+    page_title="SST AI Finnhub Scanner",
     page_icon="🚀",
     layout="wide"
 )
 
 
-st.title("🚀 SST AI Trading Scanner")
-st.caption("Yahoo Finance • Intraday • AI Score")
+st.title("🚀 SST AI Trading Scanner - Finnhub")
 
 
-# ==========================
+# =========================
+# API KEY
+# =========================
+
+api_key = st.sidebar.text_input(
+    "Finnhub API Key",
+    type="password"
+)
+
+
+# =========================
 # WATCHLIST
-# ==========================
+# =========================
 
 if "tickers" not in st.session_state:
-    st.session_state.tickers = [
+    st.session_state.tickers=[
         "NVDA",
         "TSLA",
         "AAPL"
     ]
 
 
-with st.sidebar:
-
-    st.header("Watchlist")
-
-    new_ticker = st.text_input(
-        "Add ticker"
-    )
+st.sidebar.header("Watchlist")
 
 
-    if st.button("Add"):
-
-        if new_ticker:
-            t = new_ticker.upper()
-
-            if t not in st.session_state.tickers:
-                st.session_state.tickers.append(t)
+new = st.sidebar.text_input(
+    "Add ticker"
+)
 
 
-    remove = st.selectbox(
-        "Remove ticker",
-        [""] + st.session_state.tickers
-    )
+if st.sidebar.button("Add"):
 
+    if new:
 
-    if st.button("Delete"):
+        t=new.upper()
 
-        if remove:
-            st.session_state.tickers.remove(remove)
+        if t not in st.session_state.tickers:
+            st.session_state.tickers.append(t)
 
 
 
-# ==========================
+remove = st.sidebar.selectbox(
+    "Remove",
+    [""]+st.session_state.tickers
+)
+
+
+if st.sidebar.button("Delete"):
+
+    if remove:
+        st.session_state.tickers.remove(remove)
+
+
+
+interval = st.sidebar.selectbox(
+    "Interval",
+    [
+        "1",
+        "5",
+        "15",
+        "60"
+    ],
+    index=1
+)
+
+
+
+# =========================
 # INDICATORS
-# ==========================
+# =========================
 
 
-def ema(series, length=20):
+def EMA(data,period=20):
 
     return (
-        series
-        .ewm(span=length)
+        data
+        .ewm(span=period)
         .mean()
         .iloc[-1]
     )
 
 
+def RSI(data,period=14):
 
-def rsi(series, period=14):
+    delta=data.diff()
 
-    delta = series.diff()
+    gain=delta.clip(lower=0)
 
-    gain = delta.clip(lower=0)
-
-    loss = -delta.clip(upper=0)
-
-
-    avg_gain = gain.rolling(period).mean()
-
-    avg_loss = loss.rolling(period).mean()
+    loss=-delta.clip(upper=0)
 
 
-    rs = avg_gain / avg_loss
+    avg_gain=gain.rolling(period).mean()
+
+    avg_loss=loss.rolling(period).mean()
 
 
-    value = 100 - (100/(1+rs))
+    rs=avg_gain/avg_loss
 
 
-    return value.iloc[-1]
+    rsi=100-(100/(1+rs))
+
+    return rsi.iloc[-1]
 
 
 
-def vwap(df):
+def VWAP(df):
 
-    price = (
-        df.High +
-        df.Low +
-        df.Close
-    ) / 3
+    price=(
+        df.high+
+        df.low+
+        df.close
+    )/3
 
 
     return (
-        price * df.Volume
-    ).sum() / df.Volume.sum()
+        price*df.volume
+    ).sum()/df.volume.sum()
 
 
 
-def volume_spike(df):
+# =========================
+# FINNHUB DATA
+# =========================
 
-    avg = (
-        df.Volume
-        .tail(20)
-        .mean()
+
+def get_candles(symbol):
+
+
+    end=int(time.time())
+
+    start=end-86400
+
+
+    url="https://finnhub.io/api/v1/stock/candle"
+
+
+    params={
+
+        "symbol":symbol,
+
+        "resolution":interval,
+
+        "from":start,
+
+        "to":end,
+
+        "token":api_key
+    }
+
+
+    r=requests.get(
+        url,
+        params=params
     )
 
 
-    current = (
-        df.Volume
-        .iloc[-1]
-    )
+    data=r.json()
 
 
-    return current > avg * 2
+    if data.get("s")!="ok":
 
-
-
-# ==========================
-# SCORING
-# ==========================
-
-
-def ai_score(df):
-
-    price = df.Close.iloc[-1]
-
-    score = 0
-
-
-    e = ema(df.Close)
-
-    r = rsi(df.Close)
-
-    v = vwap(df)
+        return None
 
 
 
-    if price > e:
-        score += 25
+    df=pd.DataFrame({
+
+        "time":data["t"],
+
+        "open":data["o"],
+
+        "high":data["h"],
+
+        "low":data["l"],
+
+        "close":data["c"],
+
+        "volume":data["v"]
+
+    })
 
 
-    if price > v:
-        score += 25
-
-
-    if r > 55:
-        score += 25
-
-
-    if volume_spike(df):
-        score += 25
-
-
-    return score
+    return df
 
 
 
-# ==========================
+# =========================
+# SCORE
+# =========================
+
+
+def calculate_score(df):
+
+
+    price=df.close.iloc[-1]
+
+    score=0
+
+
+    ema=EMA(df.close)
+
+    rsi=RSI(df.close)
+
+    vwap=VWAP(df)
+
+
+    avg_vol=df.volume.tail(20).mean()
+
+    spike=df.volume.iloc[-1] > avg_vol*2
+
+
+    breakout=price >= df.high.tail(20).max()*0.99
+
+
+
+    if price>ema:
+        score+=25
+
+
+    if price>vwap:
+        score+=25
+
+
+    if rsi>55:
+        score+=25
+
+
+    if spike:
+        score+=25
+
+
+
+    return score,rsi,ema,vwap,spike,breakout
+
+
+
+# =========================
 # SCANNER
-# ==========================
+# =========================
 
 
 results=[]
 
 
-for ticker in st.session_state.tickers:
+if api_key:
 
 
-    try:
-
-        data = yf.download(
-            ticker,
-            period="5d",
-            interval="5m",
-            progress=False
-        )
+    for ticker in st.session_state.tickers:
 
 
-        if data.empty:
+        df=get_candles(ticker)
+
+
+        if df is None:
 
             continue
 
 
 
-        # Multi timeframe
-        score = ai_score(data)
-
-
-        price = float(
-            data.Close.iloc[-1]
-        )
-
-
-        r = float(
-            rsi(data.Close)
-        )
-
-
-        e = float(
-            ema(data.Close)
-        )
-
-
-        v = float(
-            vwap(data)
-        )
-
-
-        spike = volume_spike(data)
-
-
-        high = float(
-            data.High.max()
-        )
-
-
-        low = float(
-            data.Low.min()
-        )
-
-
-        if score >=75:
-            signal="🔥 STRONG BUY"
-
-        elif score >=50:
-            signal="👀 WATCH"
-
-        else:
-            signal="⚠️ WEAK"
-
+        score,rsi,ema,vwap,spike,breakout=calculate_score(df)
 
 
         results.append({
 
             "Ticker":ticker,
-            "Price":round(price,2),
-            "RSI":round(r,1),
-            "EMA20":round(e,2),
-            "VWAP":round(v,2),
-            "Volume Spike":spike,
-            "High":round(high,2),
-            "Low":round(low,2),
-            "AI Score":score,
-            "Signal":signal
+
+            "Price":round(df.close.iloc[-1],2),
+
+            "RSI":round(rsi,1),
+
+            "EMA20":round(ema,2),
+
+            "VWAP":round(vwap,2),
+
+            "Volume Spike":"🔥" if spike else "",
+
+            "Breakout":"🚀" if breakout else "",
+
+            "AI Score":score
 
         })
 
-
-    except Exception as ex:
-
-        st.warning(
-            f"{ticker}: {ex}"
-        )
-
-
-
-# ==========================
-# DISPLAY
-# ==========================
 
 
 if results:
 
 
-    df=pd.DataFrame(results)
+    table=pd.DataFrame(results)
 
 
-    df=df.sort_values(
+    table=table.sort_values(
         "AI Score",
         ascending=False
     )
 
 
-    st.subheader("🔥 Top SST Setups")
+    st.subheader("🔥 SST Top Setups")
 
 
     st.dataframe(
-        df,
+        table,
         use_container_width=True
     )
 
@@ -303,61 +325,15 @@ if results:
     st.subheader("🏆 Top 3")
 
 
-    for _,row in df.head(3).iterrows():
+    for _,row in table.head(3).iterrows():
 
         st.success(
-            f"{row.Ticker} → {row['AI Score']}%  {row.Signal}"
-        )
-
-
-
-    # Chart
-
-    selected = st.selectbox(
-        "Chart",
-        st.session_state.tickers
-    )
-
-
-    chart = yf.download(
-        selected,
-        period="5d",
-        interval="5m",
-        progress=False
-    )
-
-
-    if not chart.empty:
-
-
-        fig=go.Figure()
-
-
-        fig.add_trace(
-            go.Candlestick(
-                x=chart.index,
-                open=chart.Open,
-                high=chart.High,
-                low=chart.Low,
-                close=chart.Close
-            )
-        )
-
-
-        fig.update_layout(
-            height=500,
-            template="plotly_dark"
-        )
-
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
+            f"{row.Ticker}  →  {row['AI Score']}%"
         )
 
 
 else:
 
     st.info(
-        "No data available"
+        "Enter Finnhub API key"
     )
